@@ -2,67 +2,32 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import vinylLogo from './assets/vinyl-logo.svg'
 import './App.css'
 
-const songs = [
-  {
-    id: 1,
-    title: 'Midnight City',
-    artist: 'M83',
-    album: 'Hurry Up, We’re Dreaming',
-    duration: '4:03',
-    image:
-      'https://images.unsplash.com/photo-1534791547706-6c8f9f6b5f3d?auto=format&fit=crop&w=800&q=85',
-  },
-  {
-    id: 2,
-    title: 'Borderline',
-    artist: 'Tame Impala',
-    album: 'The Slow Rush',
-    duration: '3:58',
-    image:
-      'https://images.unsplash.com/photo-1519608487953-e999c86e7455?auto=format&fit=crop&w=800&q=85',
-  },
-  {
-    id: 3,
-    title: 'Sunset Lover',
-    artist: 'Petit Biscuit',
-    album: 'Presence',
-    duration: '3:58',
-    image:
-      'https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?auto=format&fit=crop&w=800&q=85',
-  },
-  {
-    id: 4,
-    title: 'A Moment Apart',
-    artist: 'ODESZA',
-    album: 'A Moment Apart',
-    duration: '3:54',
-    image:
-      'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?auto=format&fit=crop&w=800&q=85',
-  },
-  {
-    id: 5,
-    title: 'The Less I Know The Better',
-    artist: 'Tame Impala',
-    album: 'Currents',
-    duration: '3:36',
-    image:
-      'https://images.unsplash.com/photo-1519608487953-e999c86e7455?auto=format&fit=crop&w=800&q=85',
-  },
-]
+const songs = []
+const emptySong = {
+  id: 'empty',
+  title: 'No song selected',
+  artist: 'Search for music to start listening',
+  album: '',
+  duration: '0:00',
+  image: vinylLogo,
+  audioUrl: '',
+}
 
-const mixes = [
-  { label: 'Daily mix 01', subtitle: 'Dreamy electronic', image: songs[0].image },
-  { label: 'Indie essentials', subtitle: 'For your next adventure', image: songs[1].image },
-  { label: 'Late night drive', subtitle: 'Atmospheric & mellow', image: songs[3].image },
-]
+function readStoredApiSongs(key) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(key))
+    return Array.isArray(stored) ? stored.filter((song) => song?.videoId) : []
+  } catch {
+    return []
+  }
+}
 
-const MUSIC_API = import.meta.env.VITE_MUSIC_API_URL || 'http://127.0.0.1:8000'
-const AUDIO_URLS = [
-  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
-  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
-  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
-]
-
+const MUSIC_API = import.meta.env.VITE_MUSIC_API_URL
+  || (typeof window !== 'undefined'
+    ? import.meta.env.DEV
+      ? `${window.location.protocol}//${window.location.hostname}:8000`
+      : window.location.origin
+    : 'http://127.0.0.1:8000')
 // suggestions area on the search tab
 
 const words = (value) => String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 2)
@@ -106,26 +71,85 @@ function Icon({ name, size = 20, stroke = 1.8 }) {
     chevron: <path d="m9 18 6-6-6-6" />,
     plus: <><path d="M12 5v14M5 12h14" /></>,
     volume: <><path d="M4 10v4h4l5 4V6l-5 4Z" /><path d="M17 9a5 5 0 0 1 0 6M19.5 6.5a9 9 0 0 1 0 11" /></>,
+    queue: <><path d="M4 6h11M4 12h11M4 18h7" /><path d="m17 15 3 3-3 3" /><path d="M20 18h-6" /></>,
   }
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
+
+function rankRelatedSongs(current, candidates) {
+  const currentWords = new Set(words(`${current.title} ${current.artist} ${current.album}`))
+  const seen = new Set([current.id])
+  return candidates
+    .filter((song) => song && song.id !== undefined && !seen.has(song.id))
+    .filter((song) => {
+      if (seen.has(song.id)) return false
+      seen.add(song.id)
+      return true
+    })
+    .map((song) => {
+      const songWords = words(`${song.title} ${song.artist} ${song.album}`)
+      const sharedWords = songWords.filter((word) => currentWords.has(word)).length
+      const sameArtist = String(song.artist || '').toLowerCase() === String(current.artist || '').toLowerCase()
+      const sameAlbum = String(song.album || '').toLowerCase() === String(current.album || '').toLowerCase()
+      return { song, score: sharedWords + (sameArtist ? 12 : 0) + (sameAlbum ? 6 : 0) }
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8)
+    .map(({ song }) => song)
+}
+
+function parseLyrics(data, duration) {
+  if (data.syncedLyrics) {
+    return data.syncedLyrics.split(/\r?\n/).flatMap((line) => {
+      const match = line.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/)
+      if (!match || !match[3].trim()) return []
+      return [{ time: Number(match[1]) * 60 + Number(match[2]), text: match[3].trim() }]
+    })
+  }
+
+  const lines = String(data.plainLyrics || '').split(/\r?\n/).map((text) => text.trim()).filter(Boolean)
+  const totalSeconds = Number.isFinite(duration) && duration > 0 ? duration : 1
+  return lines.map((text, index) => ({ time: (index / Math.max(lines.length, 1)) * totalSeconds, text }))
+}
+
+function durationToSeconds(duration) {
+  const parts = String(duration || '').split(':').map(Number)
+  if (parts.some((part) => !Number.isFinite(part))) return 0
+  return parts.length === 2 ? parts[0] * 60 + parts[1] : parts[0] || 0
+}
+
 // expanded music player
 
 function App() {
   const [tab, setTab] = useState('Home')
-  const [current, setCurrent] = useState({ ...songs[0], audioUrl: AUDIO_URLS[0] })
-  const [playing, setPlaying] = useState(true)
-  const [liked, setLiked] = useState(false)
+  const [current, setCurrent] = useState(emptySong)
+  const [playing, setPlaying] = useState(false)
+  const [likedSongs, setLikedSongs] = useState(() => {
+    return readStoredApiSongs('vinyl-liked-songs')
+  })
+  const [libraryView, setLibraryView] = useState('all')
+  const [libraryFilter, setLibraryFilter] = useState('playlists')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [muted, setMuted] = useState(false)
   const [shuffle, setShuffle] = useState(false)
   const [search, setSearch] = useState('')
   const [apiSongs, setApiSongs] = useState([])
-  const [latestSongs, setLatestSongs] = useState(songs)
+  const [latestSongs, setLatestSongs] = useState([])
   const [suggestions, setSuggestions] = useState([])
   const [suggestionsLoading, setSuggestionsLoading] = useState(false)
   const [isSearching, setIsSearching] = useState(false)
   const [searchError, setSearchError] = useState('')
   const [playerError, setPlayerError] = useState('')
   const [playerExpanded, setPlayerExpanded] = useState(false)
+  const [queueOpen, setQueueOpen] = useState(false)
+  const [queue, setQueue] = useState([])
+  const [lyricsData, setLyricsData] = useState({
+    trackId: emptySong.id,
+    lines: [],
+    loading: true,
+    error: '',
+  })
+  const lyricsListRef = useRef(null)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [savedProgress, setSavedProgress] = useState(() => {
     try {
@@ -138,26 +162,24 @@ function App() {
   // saved progress on played music
 
   const savedProgressRef = useRef(savedProgress)
+  const resetPlaybackRef = useRef(false)
   useEffect(() => {
     savedProgressRef.current = savedProgress
   }, [savedProgress])
   const [progress, setProgress] = useState(38)
   const [lastPlayed, setLastPlayed] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem('vinyl-last-played')) || []
-    } catch {
-      return []
-    }
+    return readStoredApiSongs('vinyl-last-played')
   })
   const audioRef = useRef(null)
   const [librarySongs, setLibrarySongs] = useState(() => {
-    try {
-      const stored = localStorage.getItem('vinyl-library')
-      return stored ? JSON.parse(stored) : songs
-    } catch {
-      return songs
-    }
+    return readStoredApiSongs('vinyl-library')
   })
+  const liked = likedSongs.some((song) => song.id === current.id)
+  const filteredLibrarySongs = libraryFilter === 'artists'
+    ? librarySongs.filter((song, index, collection) => collection.findIndex((item) => item.artist === song.artist) === index)
+    : libraryFilter === 'albums'
+      ? librarySongs.filter((song, index, collection) => collection.findIndex((item) => item.album === song.album) === index)
+      : librarySongs
 
   useEffect(() => {
     const controller = new AbortController()
@@ -187,8 +209,7 @@ function App() {
         setApiSongs(data.results || [])
       } catch (error) {
         if (error.name !== 'AbortError') {
-          const localMatches = songs.filter((song) => `${song.title} ${song.artist}`.toLowerCase().includes(query.toLowerCase()))
-          setApiSongs(localMatches.length ? localMatches : songs)
+          setApiSongs([])
           setSearchError('')
         }
       } finally {
@@ -205,6 +226,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('vinyl-library', JSON.stringify(librarySongs))
   }, [librarySongs])
+
+  useEffect(() => {
+    localStorage.setItem('vinyl-liked-songs', JSON.stringify(likedSongs))
+  }, [likedSongs])
 
   useEffect(() => {
     localStorage.setItem('vinyl-last-played', JSON.stringify(lastPlayed))
@@ -241,13 +266,55 @@ function App() {
   }, [savedProgress])
 
   useEffect(() => {
+    const controller = new AbortController()
+    const params = new URLSearchParams({
+      title: current.title || '',
+      artist: current.artist || '',
+      album: current.album || '',
+    })
+    fetch(`${MUSIC_API}/api/lyrics?${params}`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('Lyrics unavailable')))
+      .then((data) => setLyricsData({
+        trackId: current.id,
+        lines: parseLyrics(data, Number(current.duration_seconds) || durationToSeconds(current.duration)),
+        loading: false,
+        error: '',
+      }))
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setLyricsData({ trackId: current.id, lines: [], loading: false, error: 'Lyrics unavailable for this song.' })
+        }
+      })
+    return () => controller.abort()
+  }, [current])
+
+  const lyricsLoading = lyricsData.trackId !== current.id || lyricsData.loading
+  const lyricsError = lyricsData.trackId === current.id ? lyricsData.error : ''
+  const lyrics = lyricsData.trackId === current.id ? lyricsData.lines : []
+  const activeLyricIndex = lyrics.reduce((active, lyric, index) => (
+    elapsedSeconds >= lyric.time ? index : active
+  ), -1)
+
+  useEffect(() => {
+    const activeLine = lyricsListRef.current?.querySelector('.active')
+    activeLine?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [activeLyricIndex])
+
+  useEffect(() => {
     const audio = audioRef.current
-    if (!audio || !current.audioUrl) return
+    if (!audio) return
     let cleanup
+    if (!current.audioUrl) {
+      audio.pause()
+      audio.removeAttribute('src')
+      delete audio.dataset.source
+      return undefined
+    }
     if (audio.dataset.source !== current.audioUrl) {
       audio.src = current.audioUrl
       audio.dataset.source = current.audioUrl
-      const resumeAt = Number(savedProgressRef.current[current.id]) || 0
+      const resumeAt = resetPlaybackRef.current ? 0 : Number(savedProgressRef.current[current.id]) || 0
+      resetPlaybackRef.current = false
       const restorePosition = () => {
         if (Number.isFinite(audio.duration) && resumeAt > 0 && resumeAt < audio.duration - 3) {
           audio.currentTime = resumeAt
@@ -257,9 +324,18 @@ function App() {
       }
       audio.addEventListener('loadedmetadata', restorePosition, { once: true })
       cleanup = () => audio.removeEventListener('loadedmetadata', restorePosition)
+      audio.load()
     }
     if (playing) {
-      audio.play().catch(() => setPlaying(false))
+      if (audio.ended) {
+        audio.currentTime = 0
+      }
+      audio.play()
+        .then(() => setPlayerError(''))
+        .catch(() => {
+          setPlaying(false)
+          setPlayerError('Playback was blocked or the audio stream is unavailable.')
+        })
     } else {
       audio.pause()
     }
@@ -267,50 +343,118 @@ function App() {
   }, [current, playing])
 
   const filteredSongs = useMemo(() => {
-    if (search.trim().length >= 2) return apiSongs
+    const q = search.trim().toLowerCase()
+    // If the user is searching (2+ chars) prefer API results when present.
+    // If the API returned no results (or is unreachable), fall back to a local
+    // filter so users still see matching songs immediately.
+    if (q.length >= 2) {
+      if (apiSongs && apiSongs.length) return apiSongs
+      return []
+    }
     return songs
   }, [apiSongs, search])
   const displayedSuggestions = lastPlayed.length ? suggestions : latestSongs.slice(0, 4)
+  const recommendationSongs = suggestions.length ? suggestions : latestSongs.slice(0, 4)
 
-  const selectSong = async (song) => {
+  const playAudioUrl = (audioUrl) => {
+    const audio = audioRef.current
+    if (!audio || !audioUrl) return
+    if (audio.dataset.source !== audioUrl) {
+      audio.src = audioUrl
+      audio.dataset.source = audioUrl
+      audio.currentTime = 0
+      audio.load()
+    }
+
+    audio.play()
+      .then(() => {
+        resetPlaybackRef.current = false
+        setPlaying(true)
+        setPlayerError('')
+      })
+      .catch(() => {
+        setPlaying(false)
+        setPlayerError('Playback was blocked or the audio stream is unavailable.')
+      })
+  }
+
+  const toggleLike = () => {
+    setLikedSongs((saved) => (
+      saved.some((song) => song.id === current.id)
+        ? saved.filter((song) => song.id !== current.id)
+        : [current, ...saved]
+    ))
+  }
+
+  const selectSong = async (song, { preserveQueue = false } = {}) => {
     const isRemoteSong = Boolean(song.videoId)
     const playableSong = isRemoteSong
       ? { ...song, audioUrl: '' }
       : song.audioUrl
         ? song
-        : { ...song, audioUrl: AUDIO_URLS[Math.abs(Number(song.id) || 0) % AUDIO_URLS.length] }
+        : song
     setCurrent(playableSong)
-    setPlaying(Boolean(playableSong.audioUrl))
+    setPlaying(false)
     setProgress(0)
+    setElapsedSeconds(0)
+    resetPlaybackRef.current = true
+    setSavedProgress((positions) => {
+      const nextPositions = { ...positions }
+      delete nextPositions[playableSong.id]
+      return nextPositions
+    })
     setPlayerError('')
+    if (!preserveQueue) {
+      setQueue(rankRelatedSongs(playableSong, [...apiSongs, ...latestSongs, ...suggestions, ...songs]))
+    }
     setLastPlayed((played) => [playableSong, ...played.filter((item) => item.id !== playableSong.id)].slice(0, 8))
     setLibrarySongs((saved) => saved.some((item) => item.id === playableSong.id) ? saved.map((item) => item.id === playableSong.id ? playableSong : item) : [playableSong, ...saved])
 
     if (isRemoteSong) {
+      let timeout
       try {
-        const response = await fetch(`${MUSIC_API}/api/stream/${encodeURIComponent(song.videoId)}`)
+        const controller = new AbortController()
+        timeout = setTimeout(() => controller.abort(), 15000)
+        const response = await fetch(`${MUSIC_API}/api/stream/${encodeURIComponent(song.videoId)}`, {
+          signal: controller.signal,
+        })
         const data = await response.json()
         if (!response.ok || !data.audioUrl) throw new Error(data.error || 'Track unavailable')
         const resolvedSong = { ...song, audioUrl: data.audioUrl }
         setCurrent(resolvedSong)
         setPlaying(true)
+        setPlayerError('')
         setLastPlayed((played) => [resolvedSong, ...played.filter((item) => item.id !== resolvedSong.id)].slice(0, 8))
         setLibrarySongs((saved) => saved.map((item) => item.id === resolvedSong.id ? resolvedSong : item))
-      } catch {
-        setPlayerError('This track could not be played. Try another song.')
+      } catch (error) {
+        setPlayerError(error.name === 'AbortError'
+          ? 'The music service took too long to respond. Start server.py and try again.'
+          : `This track could not be loaded. Start server.py and try again.`)
         setPlaying(false)
+      } finally {
+        clearTimeout(timeout)
       }
+    } else {
+      playAudioUrl(playableSong.audioUrl)
     }
   }
 
   const nextSong = () => {
-    const collection = filteredSongs.length ? filteredSongs : songs
+    if (queue.length) {
+      const [next, ...remaining] = queue
+      setQueue(remaining)
+      selectSong(next, { preserveQueue: true })
+      return
+    }
+    const collection = filteredSongs.length ? filteredSongs : latestSongs
+    if (!collection.length) return
     const index = collection.findIndex((song) => song.id === current.id)
     selectSong(collection[(index + 1) % collection.length])
   }
 
   const previousSong = () => {
-    const collection = filteredSongs.length ? filteredSongs : songs
+    const collection = filteredSongs.length ? filteredSongs : latestSongs
+    if (!collection.length) return
     const index = collection.findIndex((song) => song.id === current.id)
     selectSong(collection[(index - 1 + collection.length) % collection.length])
   }
@@ -351,11 +495,42 @@ function App() {
     setSavedProgress((positions) => ({ ...positions, [current.id]: nextTime }))
   }
 
+  const togglePlayback = () => {
+    const audio = audioRef.current
+    if (!audio || !current.audioUrl) return
+    if (playing) {
+      audio.pause()
+      setPlaying(false)
+      return
+    }
+
+    if (audio.ended) audio.currentTime = 0
+    audio.play()
+      .then(() => {
+        setPlayerError('')
+        setPlaying(true)
+      })
+      .catch(() => {
+        setPlaying(false)
+        setPlayerError('Playback was blocked or the audio stream is unavailable.')
+      })
+  }
+
+  const toggleMute = () => {
+    const audio = audioRef.current
+    const nextMuted = !muted
+    if (audio) audio.muted = nextMuted
+    setMuted(nextMuted)
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><img className="brand-logo" src={vinylLogo} alt="" /><span>vinyl</span></div>
-        <button className="profile" aria-label="Profile">JM</button>
+        <div className="profile-wrap">
+          <button className="profile" onClick={() => setProfileOpen(!profileOpen)} aria-label="Profile" aria-expanded={profileOpen}>JM</button>
+          {profileOpen && <div className="profile-menu"><strong>Janno</strong><span>Local profile</span><button onClick={() => { setProfileOpen(false); setTab('Library') }}>Open library</button></div>}
+        </div>
       </header>
 
       <main className="content">
@@ -373,7 +548,7 @@ function App() {
                 <span className="pill">YOUR DAILY MIX</span>
                 <h2>Deep focus,<br />soft edges.</h2>
                 <p>ODESZA, Bonobo, Tycho and more</p>
-                <button className="light-button" onClick={() => setPlaying(!playing)}>
+                <button className="light-button" onClick={togglePlayback}>
                   <Icon name={playing ? 'pause' : 'play'} size={15} /> {playing ? 'Pause mix' : 'Play mix'}
                 </button>
               </div>
@@ -382,22 +557,24 @@ function App() {
             <section className="section-block">
               <div className="section-heading"><h2>Latest viral</h2><span className="section-note">Trending now</span></div>
               <div className="horizontal-scroll">
-                {mixes.map((mix) => (
-                  <button className="mix-card" key={mix.label} onClick={() => selectSong(songs.find((song) => song.image === mix.image) || songs[0])}>
-                    <img src={mix.image} alt="" />
-                    <strong>{mix.label}</strong>
-                    <span>{mix.subtitle}</span>
+                {latestSongs.slice(0, 5).map((song) => (
+                  <button className="mix-card" key={song.id} onClick={() => selectSong(song)}>
+                    <img src={song.image} alt="" />
+                    <strong>{song.title}</strong>
+                    <span>{song.artist}</span>
                   </button>
                 ))}
+                {!latestSongs.length && <p className="empty">Start the music service to load trending songs.</p>}
               </div>
             </section>
 
             <section className="section-block">
               <div className="section-heading"><h2>Continue listening</h2><span className="section-note">{lastPlayed.length ? 'Recently played' : 'Start your first track'}</span></div>
               <div className="recent-list">
-                {(lastPlayed.length ? lastPlayed.slice(0, 4) : songs.slice(0, 3)).map((song) => (
+                {(lastPlayed.length ? lastPlayed.slice(0, 4) : latestSongs.slice(0, 3)).map((song) => (
                   <SongRow key={song.id} song={song} current={current} playing={playing} onSelect={selectSong} />
                 ))}
+                {!lastPlayed.length && !latestSongs.length && <p className="empty">Search for a song to start listening.</p>}
               </div>
             </section>
 
@@ -406,6 +583,15 @@ function App() {
               {latestSongs.slice(0, 4).map((song) => (
                 <SongRow key={song.id} song={song} current={current} playing={playing} onSelect={selectSong} />
               ))}
+            </section>
+
+            <section className="section-block recommendations-block">
+              <div className="section-heading"><div><h2>Recommended for you</h2><span className="section-note">{lastPlayed.length ? 'Based on your recent plays' : 'Fresh picks to get you started'}</span></div></div>
+              {recommendationSongs.length > 0 ? (
+                <div className="result-grid">{recommendationSongs.slice(0, 4).map((song) => <button key={song.id} className="result-card" onClick={() => selectSong(song)}><img src={song.image} alt="" /><strong>{song.title}</strong><span>{song.artist}</span></button>)}</div>
+              ) : (
+                <p className="empty">Play a few songs and your recommendations will appear here.</p>
+              )}
             </section>
           </>
         )}
@@ -417,7 +603,7 @@ function App() {
             <div className="search-tags"><span>Chill</span><span>Focus</span><span>New releases</span><span>Workout</span></div>
             {search.trim().length < 2 && (
               <section className="suggestions-block">
-                <div className="section-heading"><div><h2>Made for you</h2><span className="section-note">Based on your recent plays</span></div>{suggestionsLoading && <span className="search-status">Finding matches…</span>}</div>
+                <div className="section-heading"><div><h2>Recommended for you</h2><span className="section-note">Based on your recent plays</span></div>{suggestionsLoading && <span className="search-status">Finding matches…</span>}</div>
                 {!suggestionsLoading && displayedSuggestions.length > 0 && <div className="result-grid">{displayedSuggestions.map((song) => <button key={song.id} className="result-card" onClick={() => selectSong(song)}><img src={song.image} alt="" /><strong>{song.title}</strong><span>{song.artist}</span></button>)}</div>}
                 {!suggestionsLoading && !displayedSuggestions.length && <p className="empty">Play a few songs and your recommendations will appear here.</p>}
               </section>
@@ -431,12 +617,29 @@ function App() {
 
         {tab === 'Library' && (
           <section className="page-section">
-            <div className="library-title"><div><p className="eyebrow">YOUR COLLECTION</p><h1>Library</h1><p className="muted">{librarySongs.length} songs saved on this device</p></div><button className="icon-button" onClick={() => setTab('Search')} aria-label="Add music"><Icon name="plus" /></button></div>
-            <div className="library-tabs"><button className="active">Playlists</button><button>Songs</button><button>Albums</button><button>Artists</button></div>
-            <div className="playlist-row"><div className="playlist-cover gradient-cover"><Icon name="heart" size={27} /></div><div><strong>Liked songs</strong><span>{liked ? '1 song' : '0 songs'}</span></div><Icon name="chevron" size={18} /></div>
-            <div className="library-list-heading"><h2>All music</h2><span>Saved automatically</span></div>
-            <div className="library-song-list">{librarySongs.map((song) => <SongRow key={song.id} song={song} current={current} playing={playing} onSelect={selectSong} />)}</div>
-            {!librarySongs.length && <p className="empty">Your library is empty. Search for a song to add it.</p>}
+            {libraryView === 'all' ? (
+              <>
+                <div className="library-title"><div><p className="eyebrow">YOUR COLLECTION</p><h1>Library</h1><p className="muted">{librarySongs.length} songs saved on this device</p></div><button className="icon-button" onClick={() => setTab('Search')} aria-label="Add music"><Icon name="plus" /></button></div>
+                <div className="library-tabs">
+                  {['playlists', 'songs', 'albums', 'artists'].map((filter) => <button key={filter} className={libraryFilter === filter ? 'active' : ''} onClick={() => setLibraryFilter(filter)}>{filter[0].toUpperCase() + filter.slice(1)}</button>)}
+                </div>
+                <button className="playlist-row" onClick={() => setLibraryView('liked')}>
+                  <div className="playlist-cover gradient-cover"><Icon name="heart" size={27} /></div>
+                  <div><strong>Liked songs</strong><span>{likedSongs.length} {likedSongs.length === 1 ? 'song' : 'songs'}</span></div>
+                  <Icon name="chevron" size={18} />
+                </button>
+                <div className="library-list-heading"><h2>{libraryFilter === 'playlists' ? 'All music' : libraryFilter}</h2><span>Saved automatically</span></div>
+                <div className="library-song-list">{filteredLibrarySongs.map((song) => <SongRow key={song.id} song={song} current={current} playing={playing} onSelect={selectSong} />)}</div>
+                {!librarySongs.length && <p className="empty">Your library is empty. Search for a song to add it.</p>}
+              </>
+            ) : (
+              <>
+                <div className="library-title liked-library-title"><div><button className="library-back" onClick={() => setLibraryView('all')}>Back to Library</button><p className="eyebrow">YOUR COLLECTION</p><h1>Liked songs</h1><p className="muted">{likedSongs.length} {likedSongs.length === 1 ? 'song' : 'songs'} you love</p></div></div>
+                <div className="liked-header"><div className="playlist-cover gradient-cover"><Icon name="heart" size={32} /></div><div><strong>Favorites</strong><span>Saved on this device</span></div></div>
+                <div className="library-song-list liked-song-list">{likedSongs.map((song) => <SongRow key={song.id} song={song} current={current} playing={playing} onSelect={selectSong} />)}</div>
+                {!likedSongs.length && <p className="empty">Songs you like will appear here.</p>}
+              </>
+            )}
           </section>
         )}
       </main>
@@ -444,15 +647,15 @@ function App() {
       <div className="player">
         <div className="player-track"><span style={{ width: `${progress}%` }} /></div>
         <div className="player-inner" role="button" tabIndex="0" onClick={() => setPlayerExpanded(true)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setPlayerExpanded(true) }}>
-          <img className="now-art" src={current.image} alt="" />
+          <img className="now-art" src={current.image} alt={`${current.title} album cover`} onClick={(event) => { event.stopPropagation(); togglePlayback() }} role="button" tabIndex="0" onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); togglePlayback() } }} />
           <div className="now-copy"><strong>{current.title}</strong><span>{current.artist}</span></div>
-          <button className={`player-like ${liked ? 'liked' : ''}`} onClick={(event) => { event.stopPropagation(); setLiked(!liked) }} aria-label="Like song"><Icon name="heart" size={19} /></button>
-          <button className="play-button" onClick={(event) => { event.stopPropagation(); setPlaying(!playing) }} aria-label={playing ? 'Pause' : 'Play'}><Icon name={playing ? 'pause' : 'play'} size={19} /></button>
+          <button className={`player-like ${liked ? 'liked' : ''}`} onClick={(event) => { event.stopPropagation(); toggleLike() }} aria-label={liked ? 'Unlike song' : 'Like song'}><Icon name="heart" size={19} /></button>
+          <button className="play-button" onClick={(event) => { event.stopPropagation(); togglePlayback() }} aria-label={playing ? 'Pause' : 'Play'}><Icon name={playing ? 'pause' : 'play'} size={19} /></button>
         </div>
         {playerError && <p className="player-error">{playerError}</p>}
         <div className="player-expanded">
           <span>{formatTime(elapsedSeconds)}</span><input className="seek-range" type="range" min="0" max="100" step="0.1" value={progress} onChange={(event) => seekTo(event.target.value)} aria-label="Seek through song" /><span>{current.duration}</span>
-          <div className="player-actions"><button className={shuffle ? 'active' : ''} onClick={() => setShuffle(!shuffle)}><Icon name="shuffle" size={19} /></button><button onClick={nextSong}><Icon name="chevron" size={22} /></button><button><Icon name="volume" size={19} /></button></div>
+          <div className="player-actions"><button className={shuffle ? 'active' : ''} onClick={() => setShuffle(!shuffle)} aria-label="Toggle shuffle"><Icon name="shuffle" size={19} /></button><button onClick={nextSong} aria-label="Next song"><Icon name="chevron" size={22} /></button><button className={muted ? 'active' : ''} onClick={toggleMute} aria-label={muted ? 'Unmute' : 'Mute'}><Icon name="volume" size={19} /></button></div>
         </div>
       </div>
 
@@ -462,24 +665,51 @@ function App() {
           <div className="player-sheet">
             <button className="player-close" onClick={() => setPlayerExpanded(false)} aria-label="Minimize player"><Icon name="down" size={24} /></button>
             <p className="eyebrow">NOW PLAYING</p>
-            <img className="expanded-art" src={current.image} alt="" />
+            <img className="expanded-art" src={current.image} alt={`${current.title} album cover`} onClick={togglePlayback} role="button" tabIndex="0" onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); togglePlayback() } }} />
             <div className="expanded-copy"><strong>{current.title}</strong><span>{current.artist}</span></div>
             <div className="expanded-progress"><input className="seek-range" type="range" min="0" max="100" step="0.1" value={progress} onChange={(event) => seekTo(event.target.value)} aria-label="Seek through song" /><div><span>{formatTime(elapsedSeconds)}</span><span>{current.duration}</span></div></div>
             <div className="expanded-controls">
               <button className={shuffle ? 'active' : ''} onClick={() => setShuffle(!shuffle)} aria-label="Shuffle"><Icon name="shuffle" size={21} /></button>
               <button onClick={previousSong} aria-label="Previous song"><Icon name="chevron" size={28} /></button>
-              <button className="expanded-play" onClick={() => setPlaying(!playing)} aria-label={playing ? 'Pause' : 'Play'}><Icon name={playing ? 'pause' : 'play'} size={24} /></button>
+              <button className="expanded-play" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'}><Icon name={playing ? 'pause' : 'play'} size={24} /></button>
               <button onClick={nextSong} aria-label="Next song"><Icon name="chevron" size={28} /></button>
-              <button className={liked ? 'active' : ''} onClick={() => setLiked(!liked)} aria-label="Like"><Icon name="heart" size={21} /></button>
+              <button className={queueOpen ? 'active' : ''} onClick={() => setQueueOpen(!queueOpen)} aria-label="Open queue"><Icon name="queue" size={21} /></button>
+              <button className={liked ? 'active' : ''} onClick={toggleLike} aria-label={liked ? 'Unlike' : 'Like'}><Icon name="heart" size={21} /></button>
+            </div>
+            {queueOpen && (
+              <QueuePanel current={current} queue={queue} playing={playing} onClear={() => setQueue([])} onSelect={(song) => {
+                setQueue((items) => items.filter((item) => item.id !== song.id))
+                selectSong(song, { preserveQueue: true })
+              }} className="mobile-queue" />
+            )}
+            <div className="lyrics-panel" ref={lyricsListRef} aria-label="Lyrics">
+              <div className="lyrics-heading"><strong>Lyrics</strong>{lyricsLoading && <span>Loading…</span>}</div>
+              {lyricsError && <p className="empty">{lyricsError}</p>}
+              {!lyricsLoading && !lyricsError && !lyrics.length && <p className="empty">No lyrics found for this song.</p>}
+              {lyrics.length > 0 && <div className="lyrics-list">{lyrics.map((lyric, index) => <p className={index === activeLyricIndex ? 'active' : ''} key={`${lyric.time}-${index}`}>{lyric.text}</p>)}</div>}
             </div>
           </div>
+          {queueOpen && (
+            <QueuePanel current={current} queue={queue} playing={playing} onClear={() => setQueue([])} onSelect={(song) => {
+              setQueue((items) => items.filter((item) => item.id !== song.id))
+              selectSong(song, { preserveQueue: true })
+            }} className="desktop-queue" />
+          )}
         </section>
       )}
 
       <nav className="bottom-nav navigation-dock">
         {['Home', 'Search', 'Library'].map((item) => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}><Icon name={item.toLowerCase()} size={21} /><span>{item}</span></button>)}
       </nav>
-      <audio ref={audioRef} onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} />
+      <audio
+        ref={audioRef}
+        onEnded={handleEnded}
+        onTimeUpdate={handleTimeUpdate}
+        onError={() => {
+          setPlaying(false)
+          setPlayerError('The audio stream could not be loaded.')
+        }}
+      />
     </div>
   )
 }
@@ -487,6 +717,31 @@ function App() {
 function SongRow({ song, current, playing, onSelect }) {
   const isCurrent = current.id === song.id
   return <button className={`song-row ${isCurrent ? 'current' : ''}`} onClick={() => onSelect(song)}><img src={song.image} alt="" /><span className="song-info"><strong>{song.title}</strong><span>{song.artist} · {song.album}</span></span>{isCurrent && playing ? <span className="equalizer"><i /><i /><i /></span> : <span className="song-duration">{song.duration}</span>}<Icon name="more" size={18} /></button>
+}
+
+function QueuePanel({ current, queue, playing, onClear, onSelect, className = '' }) {
+  return (
+    <aside className={`queue-panel ${className}`}>
+      <div className="queue-heading">
+        <div><span className="queue-kicker">PLAYBACK QUEUE</span><strong>Up next</strong></div>
+        <button onClick={onClear} disabled={!queue.length}>Clear</button>
+      </div>
+      <div className="queue-current">
+        <img src={current.image} alt="" />
+        <span><small>NOW PLAYING</small><strong>{current.title}</strong><em>{current.artist}</em></span>
+        {playing && <span className="queue-playing"><i /><i /><i /></span>}
+      </div>
+      <div className="queue-next-label"><span>Next tracks</span><b>{queue.length}</b></div>
+      {queue.length ? queue.map((song, index) => (
+        <button className="queue-item" key={song.id} onClick={() => onSelect(song)}>
+          <span className="queue-number">{String(index + 1).padStart(2, '0')}</span>
+          <img src={song.image} alt="" />
+          <span><strong>{song.title}</strong><small>{song.artist}</small></span>
+          <time>{song.duration}</time>
+        </button>
+      )) : <p className="empty">Your queue is empty.</p>}
+    </aside>
+  )
 }
 
 export default App

@@ -1,14 +1,23 @@
-from flask import Flask, jsonify, request
+import json
+import os
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from ytmusicapi import YTMusic
 import yt_dlp
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="dist", static_url_path="")
 CORS(app)
 music = YTMusic()
 
 
 def map_song(song):
+    video_id = song.get("videoId")
+    if not video_id:
+        return None
+    album = song.get("album") or {}
     artists = ", ".join(
         artist.get("name", "")
         for artist in song.get("artists", [])
@@ -17,18 +26,16 @@ def map_song(song):
     thumbnails = song.get("thumbnails", [])
     image = thumbnails[-1].get("url") if thumbnails else ""
     return {
-        "id": f"ytmusic-{song.get('videoId')}",
+        "id": f"ytmusic-{video_id}",
         "source": "ytmusicapi",
-        "videoId": song.get("videoId"),
+        "videoId": video_id,
         "title": song.get("title") or "Untitled",
         "artist": artists or "Unknown artist",
-        "album": song.get("album", {}).get("name", "YouTube Music"),
+        "album": album.get("name") or "YouTube Music",
         "duration": song.get("duration", "—"),
         "image": image,
         "pageUrl": (
-            f"https://music.youtube.com/watch?v={song.get('videoId')}"
-            if song.get("videoId")
-            else ""
+            f"https://music.youtube.com/watch?v={video_id}"
         ),
     }
 
@@ -40,14 +47,38 @@ def search():
         return jsonify({"results": []})
 
     results = music.search(query, filter="songs", limit=24)
-    return jsonify({"results": [map_song(song) for song in results]})
+    return jsonify({"results": [mapped for song in results if (mapped := map_song(song))]})
 
 
 @app.get("/api/latest")
 def latest():
     charts = music.get_charts()
     songs = charts.get("videos", []) if isinstance(charts, dict) else []
-    return jsonify({"results": [map_song(song) for song in songs[:12]]})
+    return jsonify({"results": [mapped for song in songs[:12] if (mapped := map_song(song))]})
+
+
+@app.get("/api/lyrics")
+def lyrics():
+    title = request.args.get("title", "").strip()
+    artist = request.args.get("artist", "").strip()
+    album = request.args.get("album", "").strip()
+    if not title or not artist:
+        return jsonify({"error": "A song title and artist are required"}), 400
+
+    query = (
+        f"https://lrclib.net/api/get?artist_name={quote(artist)}"
+        f"&track_name={quote(title)}&album_name={quote(album)}"
+    )
+    try:
+        response = urlopen(Request(query, headers={"User-Agent": "Vinyl/1.0"}), timeout=10)
+        data = json.load(response)
+        return jsonify({
+            "syncedLyrics": data.get("syncedLyrics") or "",
+            "plainLyrics": data.get("plainLyrics") or "",
+        })
+    except Exception as error:
+        app.logger.info("Lyrics unavailable for %s - %s: %s", artist, title, error)
+        return jsonify({"error": "Lyrics unavailable"}), 404
 
 
 @app.get("/api/stream/<video_id>")
@@ -75,5 +106,22 @@ def stream(video_id):
         return jsonify({"error": "Unable to resolve this track"}), 502
 
 
+@app.get("/")
+def frontend():
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.get("/<path:path>")
+def frontend_assets(path):
+    file_path = os.path.join(app.static_folder, path)
+    if os.path.isfile(file_path):
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, "index.html")
+
+
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8000, debug=True)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "8000")),
+        debug=os.environ.get("FLASK_DEBUG") == "1",
+    )
