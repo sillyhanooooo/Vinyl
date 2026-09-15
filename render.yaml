@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: vinyl
+    runtime: docker
+    branch: master
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/latest
