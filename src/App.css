@@ -263,14 +263,33 @@
   .player-backdrop { display: none; }
   .player-sheet { position: absolute; right: 34px; bottom: 94px; margin: 0; width: min(560px, calc(100vw - 68px)); max-height: calc(100vh - 120px); pointer-events: auto; }
   .mobile-queue { display: none; }
-  .desktop-queue { display: block; position: absolute; right: calc(34px + min(560px, calc(100vw - 68px)) + 18px); bottom: 94px; width: min(330px, calc(100vw - 650px)); max-height: calc(100vh - 120px); margin: 0; pointer-events: auto; }
+  .desktop-queue {
+    display: block;
+    position: absolute;
+    right: calc(34px + min(560px, calc(100vw - 68px)) + 18px);
+    bottom: 94px;
+    width: min(350px, calc(100vw - 650px));
+    max-height: calc(100vh - 150px);
+    margin: 0;
+    padding: 18px 10px 12px;
+    background: linear-gradient(145deg, rgba(39,42,58,.97), rgba(20,22,32,.97));
+    border-color: rgba(216,198,232,.2);
+    border-radius: 20px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.38), inset 0 1px rgba(255,255,255,.08);
+    backdrop-filter: blur(18px);
+    pointer-events: auto;
+  }
+  .desktop-queue .queue-heading { margin: 0 10px 15px; }
+  .desktop-queue .queue-current { margin: 0 5px 18px; padding: 11px; }
+  .desktop-queue .queue-next-label { margin: 0 10px 7px; }
+  .desktop-queue .queue-item { margin: 2px 0; padding: 10px; }
 }
 
 @media (max-width: 600px) {
-  .player-sheet { min-height: 100%; max-height: 100dvh; width: 100%; border: 0; border-radius: 25px 25px 0 0; padding: 30px 25px 38px; }
+  .player-sheet { min-height: 100%; max-height: 100dvh; width: 100%; border: 0; border-radius: 25px 25px 0 0; padding: 30px 25px 110px; }
   .expanded-art { width: min(76vw, 330px); }
-  .lyrics-panel { max-height: 190px; margin-top: 20px; }
-  .lyrics-list { max-height: 135px; }
-  .mobile-queue { display: block; }
+  .lyrics-panel { height: 420px; max-height: none; flex: 0 0 420px; margin-top: 20px; margin-bottom: 36px; }
+  .lyrics-list { height: 365px; max-height: none; padding-bottom: 58px; }
+  .mobile-queue { display: block; height: 420px; max-height: none; flex: 0 0 420px; margin-bottom: 36px; }
   .desktop-queue { display: none; }
 }

@@ -76,9 +76,16 @@ function Icon({ name, size = 20, stroke = 1.8 }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
 
-function rankRelatedSongs(current, candidates) {
-  const currentWords = new Set(words(`${current.title} ${current.artist} ${current.album}`))
+function rankRelatedSongs(current, candidates, history = []) {
+  const currentTitleWords = new Set(words(current.title))
+  const currentArtistWords = new Set(words(current.artist))
+  const currentAlbumWords = new Set(words(current.album))
+  const currentArtist = String(current.artist || '').trim().toLowerCase()
+  const currentAlbum = String(current.album || '').trim().toLowerCase()
+  const currentDuration = Number(current.duration_seconds) || durationToSeconds(current.duration)
+  const recentPositions = new Map(history.map((song, index) => [song.id, index]))
   const seen = new Set([current.id])
+
   return candidates
     .filter((song) => song && song.id !== undefined && !seen.has(song.id))
     .filter((song) => {
@@ -87,15 +94,64 @@ function rankRelatedSongs(current, candidates) {
       return true
     })
     .map((song) => {
-      const songWords = words(`${song.title} ${song.artist} ${song.album}`)
-      const sharedWords = songWords.filter((word) => currentWords.has(word)).length
-      const sameArtist = String(song.artist || '').toLowerCase() === String(current.artist || '').toLowerCase()
-      const sameAlbum = String(song.album || '').toLowerCase() === String(current.album || '').toLowerCase()
-      return { song, score: sharedWords + (sameArtist ? 12 : 0) + (sameAlbum ? 6 : 0) }
+      const titleWords = words(song.title)
+      const artistWords = words(song.artist)
+      const albumWords = words(song.album)
+      const sharedTitleWords = titleWords.filter((word) => currentTitleWords.has(word)).length
+      const sharedArtistWords = artistWords.filter((word) => currentArtistWords.has(word)).length
+      const sharedAlbumWords = albumWords.filter((word) => currentAlbumWords.has(word)).length
+      const candidateArtist = String(song.artist || '').trim().toLowerCase()
+      const candidateAlbum = String(song.album || '').trim().toLowerCase()
+      const candidateDuration = Number(song.duration_seconds) || durationToSeconds(song.duration)
+      const durationDifference = currentDuration && candidateDuration
+        ? Math.abs(currentDuration - candidateDuration)
+        : Infinity
+      const recentIndex = recentPositions.get(song.id)
+      let score = 0
+
+      score += sharedTitleWords * 8
+      score += sharedArtistWords * 5
+      score += sharedAlbumWords * 3
+      if (candidateArtist === currentArtist && currentArtist) score += 28
+      if (candidateAlbum === currentAlbum && currentAlbum) score += 18
+      if (durationDifference <= 20) score += 5
+      else if (durationDifference <= 60) score += 2
+      if (recentIndex !== undefined) score -= Math.max(8, 22 - recentIndex * 2)
+
+      return { song, score }
     })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 8)
+    .sort((a, b) => b.score - a.score || String(a.song.title).localeCompare(String(b.song.title)))
+    .slice(0, 30)
     .map(({ song }) => song)
+}
+
+async function fetchQueueCandidates(song, signal) {
+  const artist = String(song.artist || '').trim()
+  const album = String(song.album || '').trim()
+  const title = String(song.title || '').trim()
+  const queries = [...new Set([
+    artist,
+    album && album !== 'YouTube Music' ? `${artist} ${album}` : '',
+    title,
+  ].filter((query) => query.length >= 2))]
+
+  const responses = await Promise.all(queries.map(async (query) => {
+    try {
+      const response = await fetch(`${MUSIC_API}/api/search?q=${encodeURIComponent(query)}&filter=songs`, { signal })
+      if (!response.ok) return []
+      const data = await response.json()
+      return data.results || []
+    } catch (error) {
+      if (error.name === 'AbortError') throw error
+      return []
+    }
+  }))
+
+  const unique = new Map()
+  responses.flat().forEach((candidate) => {
+    if (candidate?.id) unique.set(candidate.id, candidate)
+  })
+  return [...unique.values()]
 }
 
 function parseLyrics(data, duration) {
@@ -132,6 +188,8 @@ function App() {
   const [profileOpen, setProfileOpen] = useState(false)
   const [muted, setMuted] = useState(false)
   const [shuffle, setShuffle] = useState(false)
+  const shuffleCursorRef = useRef(0)
+  const queueRequestRef = useRef(null)
   const [search, setSearch] = useState('')
   const [apiSongs, setApiSongs] = useState([])
   const [latestSongs, setLatestSongs] = useState([])
@@ -150,6 +208,8 @@ function App() {
     error: '',
   })
   const lyricsListRef = useRef(null)
+  const lyricsVisibleRef = useRef(false)
+  const lyricsEngagedRef = useRef(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [savedProgress, setSavedProgress] = useState(() => {
     try {
@@ -296,8 +356,30 @@ function App() {
   ), -1)
 
   useEffect(() => {
-    const activeLine = lyricsListRef.current?.querySelector('.active')
-    activeLine?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const panel = lyricsListRef.current
+    const scrollContainer = panel?.closest('.player-sheet')
+    if (!panel || !scrollContainer || typeof IntersectionObserver === 'undefined') return undefined
+
+    const observer = new IntersectionObserver(([entry]) => {
+      lyricsVisibleRef.current = entry.isIntersecting && entry.intersectionRatio >= 0.45
+      if (!lyricsVisibleRef.current) lyricsEngagedRef.current = false
+    }, { root: scrollContainer, threshold: [0, 0.45, 1] })
+    observer.observe(panel)
+    return () => {
+      observer.disconnect()
+      lyricsVisibleRef.current = false
+      lyricsEngagedRef.current = false
+    }
+  }, [playerExpanded])
+
+  useEffect(() => {
+    const panel = lyricsListRef.current
+    const list = panel?.querySelector('.lyrics-list')
+    const activeLine = list?.querySelector('.active')
+    if (!list || !activeLine || !lyricsVisibleRef.current || !lyricsEngagedRef.current) return
+
+    const targetTop = activeLine.offsetTop - (list.clientHeight / 2) + (activeLine.offsetHeight / 2)
+    list.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' })
   }, [activeLyricIndex])
 
   useEffect(() => {
@@ -393,6 +475,8 @@ function App() {
       : song.audioUrl
         ? song
         : song
+    queueRequestRef.current?.abort()
+    queueRequestRef.current = null
     setCurrent(playableSong)
     setPlaying(false)
     setProgress(0)
@@ -405,7 +489,22 @@ function App() {
     })
     setPlayerError('')
     if (!preserveQueue) {
-      setQueue(rankRelatedSongs(playableSong, [...apiSongs, ...latestSongs, ...suggestions, ...songs]))
+      const queueController = new AbortController()
+      queueRequestRef.current = queueController
+      const cachedCandidates = [...apiSongs, ...latestSongs, ...suggestions, ...librarySongs, ...songs]
+      setQueue(rankRelatedSongs(playableSong, cachedCandidates, lastPlayed))
+      fetchQueueCandidates(playableSong, queueController.signal)
+        .then((remoteCandidates) => {
+          if (queueController.signal.aborted) return
+          setQueue((existingQueue) => rankRelatedSongs(
+            playableSong,
+            [...existingQueue, ...remoteCandidates],
+            lastPlayed,
+          ))
+        })
+        .catch((error) => {
+          if (error.name !== 'AbortError') return
+        })
     }
     setLastPlayed((played) => [playableSong, ...played.filter((item) => item.id !== playableSong.id)].slice(0, 8))
     setLibrarySongs((saved) => saved.some((item) => item.id === playableSong.id) ? saved.map((item) => item.id === playableSong.id ? playableSong : item) : [playableSong, ...saved])
@@ -441,11 +540,21 @@ function App() {
 
   const nextSong = () => {
     if (queue.length) {
-      const [next, ...remaining] = queue
-      setQueue(remaining)
+      const nextIndex = shuffle ? shuffleCursorRef.current % queue.length : 0
+      if (shuffle) shuffleCursorRef.current += 1
+      const next = queue[nextIndex]
+      setQueue((items) => items.filter((_, index) => index !== nextIndex))
       selectSong(next, { preserveQueue: true })
       return
     }
+
+    const candidates = [...apiSongs, ...latestSongs, ...suggestions, ...songs]
+    const related = rankRelatedSongs(current, candidates, lastPlayed)
+    if (related.length) {
+      selectSong(related[0])
+      return
+    }
+
     const collection = filteredSongs.length ? filteredSongs : latestSongs
     if (!collection.length) return
     const index = collection.findIndex((song) => song.id === current.id)
@@ -678,11 +787,19 @@ function App() {
             </div>
             {queueOpen && (
               <QueuePanel current={current} queue={queue} playing={playing} onClear={() => setQueue([])} onSelect={(song) => {
-                setQueue((items) => items.filter((item) => item.id !== song.id))
+                setQueue((items) => items.slice(items.findIndex((item) => item.id === song.id) + 1))
                 selectSong(song, { preserveQueue: true })
               }} className="mobile-queue" />
             )}
-            <div className="lyrics-panel" ref={lyricsListRef} aria-label="Lyrics">
+            <div
+              className="lyrics-panel"
+              ref={lyricsListRef}
+              aria-label="Lyrics"
+              onPointerEnter={() => { lyricsEngagedRef.current = true }}
+              onPointerLeave={() => { lyricsEngagedRef.current = false }}
+              onTouchStart={() => { lyricsEngagedRef.current = true }}
+              onFocusCapture={() => { lyricsEngagedRef.current = true }}
+            >
               <div className="lyrics-heading"><strong>Lyrics</strong>{lyricsLoading && <span>Loading…</span>}</div>
               {lyricsError && <p className="empty">{lyricsError}</p>}
               {!lyricsLoading && !lyricsError && !lyrics.length && <p className="empty">No lyrics found for this song.</p>}
@@ -691,7 +808,7 @@ function App() {
           </div>
           {queueOpen && (
             <QueuePanel current={current} queue={queue} playing={playing} onClear={() => setQueue([])} onSelect={(song) => {
-              setQueue((items) => items.filter((item) => item.id !== song.id))
+              setQueue((items) => items.slice(items.findIndex((item) => item.id === song.id) + 1))
               selectSong(song, { preserveQueue: true })
             }} className="desktop-queue" />
           )}
@@ -733,7 +850,7 @@ function QueuePanel({ current, queue, playing, onClear, onSelect, className = ''
       </div>
       <div className="queue-next-label"><span>Next tracks</span><b>{queue.length}</b></div>
       {queue.length ? queue.map((song, index) => (
-        <button className="queue-item" key={song.id} onClick={() => onSelect(song)}>
+        <button className="queue-item" key={song.id} onClick={() => onSelect(song, index)}>
           <span className="queue-number">{String(index + 1).padStart(2, '0')}</span>
           <img src={song.image} alt="" />
           <span><strong>{song.title}</strong><small>{song.artist}</small></span>
