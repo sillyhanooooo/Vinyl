@@ -13,6 +13,11 @@ CORS(app)
 music = YTMusic()
 
 
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+
 def map_song(song):
     video_id = song.get("videoId")
     if not video_id:
